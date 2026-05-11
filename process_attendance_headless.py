@@ -4,18 +4,17 @@ Chấm Công — Headless Attendance Processor
 Designed for GitHub Actions / Task Scheduler.
 Pulls yesterday's attendance from MISA Timesheet Detail, exports xlsx, emails it.
 
-Required .env keys:
+Required .env keys / GitHub Secrets:
     MISA_CLIENT_ID
     MISA_CLIENT_SECRET
     MISA_TIMESHEET_ID       ← non-technical user edits this when timesheet rolls over
 
-    EMAIL_SMTP_HOST         e.g. smtp.gmail.com
-    EMAIL_SMTP_PORT         e.g. 587
-    EMAIL_USERNAME
-    EMAIL_PASSWORD
-    EMAIL_FROM
-    EMAIL_TO                comma-separated list of recipients
-    EMAIL_CC                (optional) comma-separated
+    AZURE_TENANT_ID
+    AZURE_CLIENT_ID
+    AZURE_CLIENT_SECRET
+    EMAIL_FROM              ← M365 mailbox to send from (must have Mail.Send permission)
+    EMAIL_TO                ← comma-separated list of recipients
+    EMAIL_CC                ← (optional) comma-separated
 """
 
 import re
@@ -26,14 +25,9 @@ import uuid
 import json
 import hashlib
 import base64
-import smtplib
 import urllib.request
 import urllib.error
 from datetime import datetime, date, time, timedelta
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email.mime.text import MIMEText
-from email import encoders
 
 import pandas as pd
 from openpyxl import Workbook
@@ -757,52 +751,90 @@ def export_report(records: list, report_date: date, output_path: str, language: 
     return output_path, len(records)
 
 # ── EMAIL ─────────────────────────────────────────────────────────────────────
+def _get_graph_token() -> str:
+    """Obtain an access token from Azure AD using client credentials flow."""
+    import urllib.parse
+    tenant_id     = _env("AZURE_TENANT_ID")
+    client_id     = _env("AZURE_CLIENT_ID")
+    client_secret = _env("AZURE_CLIENT_SECRET")
+
+    url  = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    body = urllib.parse.urlencode({
+        "grant_type":    "client_credentials",
+        "client_id":     client_id,
+        "client_secret": client_secret,
+        "scope":         "https://graph.microsoft.com/.default",
+    }).encode()
+
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            result = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Token request failed ({e.code}): {e.read().decode()[:200]}")
+
+    token = result.get("access_token")
+    if not token:
+        raise RuntimeError(f"No access_token in response: {result}")
+    return token
+
+
 def send_email(attachment_path: str, report_date: date, employee_count: int):
-    smtp_host = _env("EMAIL_SMTP_HOST")
-    smtp_port = int(_env("EMAIL_SMTP_PORT"))
-    username  = _env("EMAIL_USERNAME")
-    password  = _env("EMAIL_PASSWORD")
     from_addr = _env("EMAIL_FROM")
     to_raw    = _env("EMAIL_TO")
     cc_raw    = _env_optional("EMAIL_CC", "")
 
-    to_list = [a.strip() for a in to_raw.split(",") if a.strip()]
-    cc_list = [a.strip() for a in cc_raw.split(",") if a.strip()]
+    to_list = [{"emailAddress": {"address": a.strip()}} for a in to_raw.split(",") if a.strip()]
+    cc_list = [{"emailAddress": {"address": a.strip()}} for a in cc_raw.split(",") if a.strip()]
 
-    date_str = report_date.strftime("%d/%m/%Y")
+    date_str   = report_date.strftime("%d/%m/%Y")
     weekday_vi = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"]
-    day_name = weekday_vi[report_date.weekday()]
+    day_name   = weekday_vi[report_date.weekday()]
 
     subject = f"Bảng chấm công {day_name} {date_str}"
     body    = (
-        f"Kính gửi,\n\n"
-        f"Đính kèm bảng chấm công ngày {day_name} {date_str} "
-        f"({employee_count} nhân viên).\n\n"
-        f"Trân trọng."
+        "Kính gửi,\n\n"
+        + f"Đính kèm bảng chấm công ngày {day_name} {date_str} "
+        + f"({employee_count} nhân viên).\n\n"
+        + "Trân trọng."
     )
 
-    msg = MIMEMultipart()
-    msg["From"]    = from_addr
-    msg["To"]      = ", ".join(to_list)
-    if cc_list:
-        msg["Cc"]  = ", ".join(cc_list)
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain", "utf-8"))
-
     with open(attachment_path, "rb") as f:
-        part = MIMEBase("application", "octet-stream")
-        part.set_payload(f.read())
-    encoders.encode_base64(part)
-    part.add_header("Content-Disposition",
-                    f'attachment; filename="{os.path.basename(attachment_path)}"')
-    msg.attach(part)
+        attachment_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    all_recipients = to_list + cc_list
-    with smtplib.SMTP(smtp_host, smtp_port) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(username, password)
-        server.sendmail(from_addr, all_recipients, msg.as_string())
+    message = {
+        "message": {
+            "subject": subject,
+            "body": {"contentType": "Text", "content": body},
+            "toRecipients": to_list,
+            **({"ccRecipients": cc_list} if cc_list else {}),
+            "attachments": [
+                {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": os.path.basename(attachment_path),
+                    "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "contentBytes": attachment_b64,
+                }
+            ],
+        },
+        "saveToSentItems": "false",
+    }
+
+    token   = _get_graph_token()
+    api_url = f"https://graph.microsoft.com/v1.0/users/{from_addr}/sendMail"
+    payload = json.dumps(message).encode("utf-8")
+
+    req = urllib.request.Request(api_url, data=payload, method="POST")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            if r.status not in (200, 202):
+                raise RuntimeError(f"Graph API returned unexpected status {r.status}")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Graph sendMail failed ({e.code}): {e.read().decode()[:200]}")
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
