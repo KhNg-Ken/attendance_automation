@@ -1,0 +1,28 @@
+name: Attendance
+
+on:
+  workflow_dispatch:        # manual trigger button ← use this to test
+  schedule:
+    - cron: '0 1 * * 1-5'  # 8am ICT (UTC+7), Mon–Fri
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python process_attendance_headless.py
+        env:
+          MISA_CLIENT_ID:     ${{ secrets.MISA_CLIENT_ID }}
+          MISA_CLIENT_SECRET: ${{ secrets.MISA_CLIENT_SECRET }}
+          MISA_TIMESHEET_ID:  ${{ secrets.MISA_TIMESHEET_ID }}
+          EMAIL_SMTP_HOST:    ${{ secrets.EMAIL_SMTP_HOST }}
+          EMAIL_SMTP_PORT:    ${{ secrets.EMAIL_SMTP_PORT }}
+          EMAIL_USERNAME:     ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD:     ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_FROM:         ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO:           ${{ secrets.EMAIL_TO }}
+          EMAIL_CC:           ${{ secrets.EMAIL_CC }}
