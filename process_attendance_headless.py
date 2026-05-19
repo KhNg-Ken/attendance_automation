@@ -626,10 +626,20 @@ def merge_from_timesheet(timesheet_punch: dict, timesheet_forms: dict,
     }
 
     anchor_ids = sorted(CHECK_TO_EMP.keys(),
-                        key=lambda nid: CHECK_TO_EMP.get(nid, "ZZZ"))
+                    key=lambda nid: CHECK_TO_EMP.get(nid, "ZZZ"))
+
+    exceptions = set()
+    for path in (os.path.join(SCRIPT_DIR, "employee_exceptions.txt"),
+                os.path.join(os.getcwd(), "employee_exceptions.txt")):
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                exceptions = {l.strip().upper() for l in f if l.strip() and not l.startswith("#")}
+            break
 
     merged = []
     for nid in anchor_ids:
+        if CHECK_TO_EMP.get(nid, "").upper() in exceptions:
+            continue
         mp   = timesheet_punch.get(nid, {})
         form = timesheet_forms.get(nid, {})
 
