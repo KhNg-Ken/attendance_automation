@@ -11,7 +11,7 @@ Required .env keys / GitHub Secrets:
 
     AZURE_TENANT_ID
     AZURE_CLIENT_ID
-    AZURE_CLIENT_SECRET
+    AZURE_REFRESH_TOKEN
     EMAIL_FROM              ← M365 mailbox to send from (must have Mail.Send permission)
     EMAIL_TO                ← comma-separated list of recipients
     EMAIL_CC                ← (optional) comma-separated
@@ -105,11 +105,13 @@ def _load_env_all() -> dict[str, str]:
     global _ENV_CACHE
     if _ENV_CACHE is not None:
         return _ENV_CACHE
+    # GitHub Actions injects secrets as environment variables — check these first
+    env: dict[str, str] = {k: v for k, v in os.environ.items() if v}
+    # .env file for local development (overrides env vars if present)
     candidates = [
         os.path.join(SCRIPT_DIR, ".env"),
         os.path.join(os.getcwd(), ".env"),
     ]
-    env: dict[str, str] = {}
     for path in candidates:
         if os.path.exists(path):
             try:
@@ -120,8 +122,7 @@ def _load_env_all() -> dict[str, str]:
                             continue
                         k, _, v = line.partition("=")
                         env[k.strip()] = v.strip().strip('"').strip("'")
-                _ENV_CACHE = env
-                return env
+                break
             except Exception:
                 pass
     _ENV_CACHE = env
@@ -752,18 +753,18 @@ def export_report(records: list, report_date: date, output_path: str, language: 
 
 # ── EMAIL ─────────────────────────────────────────────────────────────────────
 def _get_graph_token() -> str:
-    """Obtain an access token from Azure AD using client credentials flow."""
+    """Obtain an access token using the refresh token (delegated Authorization Code flow)."""
     import urllib.parse
     tenant_id     = _env("AZURE_TENANT_ID")
     client_id     = _env("AZURE_CLIENT_ID")
-    client_secret = _env("AZURE_CLIENT_SECRET")
+    refresh_token = _env("AZURE_REFRESH_TOKEN")
 
     url  = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
     body = urllib.parse.urlencode({
-        "grant_type":    "client_credentials",
+        "grant_type":    "refresh_token",
         "client_id":     client_id,
-        "client_secret": client_secret,
-        "scope":         "https://graph.microsoft.com/.default",
+        "refresh_token": refresh_token,
+        "scope":         "https://graph.microsoft.com/Mail.Send offline_access",
     }).encode()
 
     req = urllib.request.Request(url, data=body, method="POST")
