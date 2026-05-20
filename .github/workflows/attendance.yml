@@ -3,7 +3,7 @@ name: Attendance
 on:
   workflow_dispatch:
   schedule:
-    - cron: '46 1 * * *' # Run at 10:30 AM GMT+7 every day
+    - cron: '46 0 * * *' # Run at 7:46 AM GMT+7 every day
 
 jobs:
   run:
